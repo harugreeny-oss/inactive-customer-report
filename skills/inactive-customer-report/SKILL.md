@@ -13,7 +13,17 @@ description: |
   신규지원자/합불처리 등의 조건을 언급하며 고객사 추출·저장을 요청하는 경우 반드시 이 스킬을 사용할 것.
 ---
 
-# 비활성 고객사 리스트업 스킬 (v3.4 — Amplitude User lookup 추가)
+# 비활성 고객사 리스트업 스킬 (v3.5 — 웍스ID 추출 + 비고 활성도 표시)
+
+## v3.5 변경 사항 (2026-05-19)
+
+- **워크스페이스 ID(웍스ID) 자동 추출**: User property `gp:Company`로 회사별 admin user들의 워크스페이스 ID(예: `WNTVhclq`)를 가져와 가장 활동량 많은 ID를 대표값으로 입력. 추출 경로는 2.5단계의 CSV 익스포트 쿼리에 컬럼 1개 추가하면 됨.
+- **`비고` 컬럼에 활성 정도 카테고리 표시**: 합불처리 수 기준으로 4단계 라벨링 + 원본 수치 병기.
+  - `매우 비활성`: 합불처리 = 0 (AND 조건 충족 = 21개사)
+  - `비활성`: 합불처리 1~9
+  - `부분 활성`: 합불처리 10~99
+  - `활성`: 합불처리 ≥ 100
+  - 포맷: `"{카테고리} (지원자 X / 합불처리 Y)"`
 
 ## v3.4 변경 사항 (2026-05-19)
 
@@ -264,7 +274,8 @@ CSV 익스포트를 1회 호출하여 enterprise 전체 회사의 user별 활동
       filters: [{subprop_type: "group", subprop_key: "grp:Plan", subprop_op: "is", subprop_value: ["enterprise"], group_type: "Company"}],
       group_by: [
         {group_type: "User", label: "[User] Email", type: "user", value: "gp:Email"},
-        {group_type: "User", label: "[User] Name", type: "user", value: "gp:Name"}
+        {group_type: "User", label: "[User] Name", type: "user", value: "gp:Name"},
+        {group_type: "User", label: "[User] Company", type: "user", value: "gp:Company"}  // v3.5: 워크스페이스 ID 추출
       ]
     }],
     range: "Last 90 Days", timezone: "Asia/Seoul"
@@ -275,8 +286,10 @@ CSV 익스포트를 1회 호출하여 enterprise 전체 회사의 user별 활동
 
 **CSV 응답 형식** (5번째 행부터 데이터):
 - 컬럼 1: 회사명
-- 컬럼 2: `"Email; Name"` (User Email; User Name 결합)
+- 컬럼 2: `"Email; Name; CompanyWorkspaceID"` (User Email; User Name; User Company 결합)
 - 컬럼 3: 카운트 (해당 user의 회사별 Add Applicant 이벤트 총합)
+
+> 별도로 워크스페이스 ID만 추출하려면 `group_by`에 `gp:Company` 하나만 두고 회사별 top WID를 뽑는다. 본 스킬은 ID 추출용 별도 CSV 호출을 1회 더 발생시켜 명확하게 분리해도 무방.
 
 **파싱 + 대표 admin 선정**:
 ```javascript
@@ -436,7 +449,12 @@ function parseAdmins(csv) {
 - `상태`: `추출`
 - `고객사 담당자`: **우선순위 1** = 이전 달 lookup (v3.3) / **우선순위 2** = Amplitude User lookup (v3.4 / 2.5단계 결과) / 둘 다 없으면 공란
 - `이메일`: 동일 우선순위
-- `웍스ID`, `비고`: 공란
+- `웍스ID` (v3.5): Amplitude User property `gp:Company`로 추출한 회사별 대표 워크스페이스 ID (예: `WNTVhclq`). 추출 실패 시 공란.
+- `비고` (v3.5): 활성 카테고리 + 원본 수치. 포맷: `"{카테고리} (지원자 X / 합불처리 Y)"`. 카테고리:
+  - `매우 비활성`: 합불처리 = 0
+  - `비활성`: 합불처리 1~9
+  - `부분 활성`: 합불처리 10~99
+  - `활성`: 합불처리 ≥ 100
 
 **정렬**: 회사명 알파벳/한글 순 또는 신규지원자 수 오름차순 권장.
 
