@@ -13,7 +13,16 @@ description: |
   신규지원자/합불처리 등의 조건을 언급하며 고객사 추출·저장을 요청하는 경우 반드시 이 스킬을 사용할 것.
 ---
 
-# 비활성 고객사 리스트업 스킬 (v3.5.1 — 비고 의미 정정: 담당자 활성도)
+# 비활성 고객사 리스트업 스킬 (v3.6 — Any Event로 0이벤트 누락 보완)
+
+## v3.6 변경 사항 (2026-05-19)
+
+- **`Add Applicant`에 안 잡히는 enterprise 회사도 `[Amplitude] Any Active Event` (event_type `_active`)로 보완 추출**.
+  - Add Applicant 이벤트는 지원자가 직접 트리거할 수도 있어 활성 admin이 있는 회사도 0건일 수 있음.
+  - `_active` (Any Event)는 admin 활동 포함 모든 이벤트를 잡으므로, "admin은 살아있는데 신규지원자 등록 0건"인 enterprise 회사를 찾을 수 있음.
+- **Set A 정의 확장**: `(Add Applicant < 5 인 enterprise)` UNION `(Add Applicant = 0 AND Pass+Fail = 0 AND Any Event > 0 인 enterprise)`.
+  - 후자 = 기존 누락분. AND 조건(P+F=0) 일관성 유지를 위해 P+F도 0인 회사만 포함.
+- **순효과**: 5월 4주차 추출이 65 → 169개사로 확장. AND 조건 충족(P+F=0)은 21 → 125개사로 증가. 진짜 위험한 "admin은 매일 들어오지만 채용 활동은 0인 회사" 식별 가능.
 
 ## v3.5.1 변경 사항 (2026-05-19)
 
@@ -219,15 +228,32 @@ const passMap = parseEntMap(passCsv);
 const failMap = parseEntMap(failCsv);
 ```
 
-**집합 추출**:
+**집합 추출** (v3.6: Any Event 보완 포함):
 
 ```javascript
 const blocked = /test|TEST|테스트|demo|DEMO|나인하이어/i;
 
-// 집합 A: Add Applicant < 5 (테스트 계정 제외)
-const setA = Object.entries(addMap)
+// 1) Add Applicant CSV에서 잡힌 enterprise: Add < 5
+const setA_fromAdd = Object.entries(addMap)
   .filter(([name, v]) => v < 5 && !blocked.test(name))
   .map(([name, v]) => ({name, add: v}));
+
+// 2) v3.6: Add Applicant CSV에 없는데 Any Event > 0인 enterprise
+//    (admin은 들어왔지만 신규지원자 등록 0)
+//    추가로 합불처리도 0이어야 AND 조건 충족
+const anyEventMap = ...;  // [Amplitude] Any Active Event CSV → company:count
+const blockedNames = new Set(setA_fromAdd.map(x => x.name));
+const setA_fromAny = Object.entries(anyEventMap)
+  .filter(([name, anyV]) => {
+    if (blocked.test(name)) return false;
+    if (blockedNames.has(name)) return false;  // 이미 setA에 있음
+    if ((addMap[name] || 0) > 0) return false;  // Add > 0 → 다른 분기 회사
+    const p = passMap[name] || 0, f = failMap[name] || 0;
+    return (p + f === 0);  // AND 조건: P+F도 0
+  })
+  .map(([name, anyV]) => ({name, add: 0, anyEvent: anyV}));
+
+const setA = [...setA_fromAdd, ...setA_fromAny];
 
 // 최종 = A ∩ B (합불처리 = 0)
 const enriched = setA.map(item => {
@@ -237,6 +263,34 @@ const enriched = setA.map(item => {
 });
 
 const final = enriched.filter(e => e.meetsAND);
+```
+
+**Any Event 추출 쿼리** (event_type `_active`):
+
+```javascript
+async function exportAnyEvent() {
+  const definition = {
+    vis: "line", app: "742296", colorAssignments: {}, recycledColors: [], shouldShowTwoYearRange: false,
+    params: {
+      segments: [{name: "All Users", conditions: []}],
+      interval: 0, nthTimeLookbackWindow: 365, additionalPeriods: [],
+      metric: "totals", countGroup: "Company", excludeDays: [],
+      periodOverPeriod: false,
+      groupBy: [
+        {type: "group", value: "grp:Name", group_type: "Company"},
+        {type: "group", value: "grp:Plan", group_type: "Company"}
+      ],
+      events: [{
+        event_type: "_active",  // [Amplitude] Any Active Event
+        filters: [{subprop_type: "group", subprop_key: "grp:Plan", subprop_op: "is", subprop_value: ["enterprise"], group_type: "Company"}],
+        group_by: []
+      }],
+      range: "Last 90 Days", timezone: "Asia/Seoul"
+    },
+    type: "eventsSegmentation", version: 41
+  };
+  // POST to /d/data/742296/csv with this definition
+}
 ```
 
 **집합 통계** (요약에 사용):
