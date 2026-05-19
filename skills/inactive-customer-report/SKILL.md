@@ -13,13 +13,23 @@ description: |
   신규지원자/합불처리 등의 조건을 언급하며 고객사 추출·저장을 요청하는 경우 반드시 이 스킬을 사용할 것.
 ---
 
-# 비활성 고객사 리스트업 스킬 (v3.3 — 이전 달 담당자/이메일 자동 lookup)
+# 비활성 고객사 리스트업 스킬 (v3.4 — Amplitude User lookup 추가)
+
+## v3.4 변경 사항 (2026-05-19)
+
+- **Amplitude User 프로퍼티에서 회사별 대표 admin user를 자동 추출하여 `고객사 담당자` / `이메일`을 채워넣는다**.
+  - 추출 방식: CSV 익스포트 1회로 모든 enterprise 회사의 user별 활동량 집계.
+    - `groupBy`: `grp:Name` (Company), `events[0].group_by`: User Email + User Name
+    - `filter`: `grp:Plan is enterprise`
+  - 우리 팀 도메인(`@jobkorea.`, `@ninehire.`, `@worxphere.`, `@wxsp.`, `@jbcompany.`, `@webcs.`) 사용자는 제외.
+  - 회사당 활동량(이벤트 카운트)이 가장 많은 user 1명을 대표 admin으로 선정.
+- **우선순위**: 이전 달 행에 사용자가 직접 입력한 값(v3.3 룰)이 있으면 그것을 우선 유지. 없으면 Amplitude User lookup 결과(v3.4)로 채움. 둘 다 없으면 공란.
+  - 사용자가 명시적으로 정한 담당자가 자동 추출 결과로 덮어쓰이는 일을 방지.
 
 ## v3.3 변경 사항 (2026-05-19)
 
 - **이전 달 행의 `고객사 담당자` / `이메일` 값을 이번 달 행에 자동 lookup하여 채워넣는다**.
   - 같은 회사가 지난 달 추출에도 있었고 그 행에 담당자/이메일이 입력돼 있으면 이번 달도 그 값을 그대로 가져온다.
-  - 두 번 입력해야 하는 비효율 제거. 한 번 담당자/이메일을 채우면 이후 추출에서도 자동 승계.
   - 회사명 매칭은 정확 일치 우선, 공백 정규화 fallback.
 
 ## v3.2 변경 사항 (2026-05-19)
@@ -235,6 +245,81 @@ const final = enriched.filter(e => e.meetsAND);
 > 차트 자체는 1단계 CSV 결과와 별개이며, Notion 요약과 Slack 메시지의 참고 링크용으로만 사용된다.
 > 차트 표시에서는 500-시리즈 한도로 잘려보일 수 있다는 점을 명심한다.
 
+### 2.5단계: Amplitude User 프로퍼티로 회사별 대표 admin 추출 (v3.4+)
+
+CSV 익스포트를 1회 호출하여 enterprise 전체 회사의 user별 활동량을 가져온다.
+
+**Definition**:
+```javascript
+{
+  vis: "line", app: "742296", colorAssignments: {}, recycledColors: [], shouldShowTwoYearRange: false,
+  params: {
+    segments: [{name: "All Users", conditions: []}],
+    interval: 0, nthTimeLookbackWindow: 365, additionalPeriods: [],
+    metric: "totals", countGroup: "User", excludeDays: [],
+    periodOverPeriod: false,
+    groupBy: [{type: "group", value: "grp:Name", group_type: "Company"}],
+    events: [{
+      event_type: "Add Applicant",
+      filters: [{subprop_type: "group", subprop_key: "grp:Plan", subprop_op: "is", subprop_value: ["enterprise"], group_type: "Company"}],
+      group_by: [
+        {group_type: "User", label: "[User] Email", type: "user", value: "gp:Email"},
+        {group_type: "User", label: "[User] Name", type: "user", value: "gp:Name"}
+      ]
+    }],
+    range: "Last 90 Days", timezone: "Asia/Seoul"
+  },
+  type: "eventsSegmentation", version: 41
+}
+```
+
+**CSV 응답 형식** (5번째 행부터 데이터):
+- 컬럼 1: 회사명
+- 컬럼 2: `"Email; Name"` (User Email; User Name 결합)
+- 컬럼 3: 카운트 (해당 user의 회사별 Add Applicant 이벤트 총합)
+
+**파싱 + 대표 admin 선정**:
+```javascript
+function parseAdmins(csv) {
+  const lines = csv.split("\r\n").filter(l => l.length > 0);
+  const blocked = /@(jobkorea\.|ninehire\.|worxphere\.|wxsp\.|jbcompany\.|webcs\.)/i;
+  const byCompany = {};
+  function parseLine(line) {
+    const out = []; let cur = "", inQ = false;
+    for (let i=0; i<line.length; i++) {
+      const ch = line[i];
+      if (ch === '"' && line[i+1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') inQ = !inQ;
+      else if (ch === ',' && !inQ) { out.push(cur); cur = ""; }
+      else cur += ch;
+    }
+    out.push(cur);
+    return out;
+  }
+  for (const line of lines.slice(4)) {
+    const cols = parseLine(line);
+    if (cols.length < 3) continue;
+    const company = cols[0];
+    const emailName = cols[1];
+    const count = parseInt(cols[2]);
+    if (isNaN(count) || !emailName.includes("; ")) continue;
+    const [email, name] = emailName.split("; ");
+    if (blocked.test(email)) continue;
+    if (!byCompany[company]) byCompany[company] = [];
+    byCompany[company].push({email, name, count});
+  }
+  // pick top by count per company
+  const top = {};
+  for (const [c, list] of Object.entries(byCompany)) {
+    list.sort((a, b) => b.count - a.count);
+    top[c] = list[0];
+  }
+  return top;  // {company: {email, name, count}}
+}
+```
+
+이 결과를 `amplitude_admins` 맵으로 보관하여 3단계의 이전 달 lookup과 함께 사용.
+
 ### 3단계: 이전 달 Notion DB 조회 (지난 달 컨택 + 담당자/이메일 lookup)
 
 이번 달 고객사에 대해 두 가지 정보를 이전 달 리스트에서 가져온다: ① 지난 달 컨택 여부, ② 담당자/이메일 자동 승계.
@@ -349,8 +434,8 @@ const final = enriched.filter(e => e.meetsAND);
 - `지난 달 컨택`: `해당` 또는 `미해당` (3단계 결과)
 - `조건`: AND 충족 시 `충족`, 아니면 `미충족`
 - `상태`: `추출`
-- `고객사 담당자`: 이전 달 행에 값 있으면 자동 lookup, 없으면 공란
-- `이메일`: 이전 달 행에 값 있으면 자동 lookup, 없으면 공란
+- `고객사 담당자`: **우선순위 1** = 이전 달 lookup (v3.3) / **우선순위 2** = Amplitude User lookup (v3.4 / 2.5단계 결과) / 둘 다 없으면 공란
+- `이메일`: 동일 우선순위
 - `웍스ID`, `비고`: 공란
 
 **정렬**: 회사명 알파벳/한글 순 또는 신규지원자 수 오름차순 권장.
